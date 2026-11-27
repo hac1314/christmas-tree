@@ -4,8 +4,21 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#080d16">
-  <meta name="description" content="开源 3D 圣诞树照片墙：支持手势交互、网页自定义照片与音乐，以及本地目录同步。">
-  <title>树上的圣诞相册</title>
+  <meta name="description" content="My adorable baby Taotao —— 挂满照片的 3D 圣诞树，支持手势交互、网页自定义照片与音乐。">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="My adorable baby Taotao">
+  <meta property="og:title" content="My adorable baby Taotao">
+  <meta property="og:description" content="挂满照片的 3D 圣诞树：一只手就能转动、缩放，照片和音乐都能换成你自己的。">
+  <meta property="og:url" content="https://choice-whu.github.io/christmas-tree/">
+  <meta property="og:image" content="https://choice-whu.github.io/christmas-tree/assets/og-cover.jpg">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="1200">
+  <meta property="og:image:alt" content="浅棕色小熊玩偶抱着睡着的小黄鸭玩偶，坐在棕色波点毛毯上">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="My adorable baby Taotao">
+  <meta name="twitter:description" content="挂满照片的 3D 圣诞树：一只手就能转动、缩放，照片和音乐都能换成你自己的。">
+  <meta name="twitter:image" content="https://choice-whu.github.io/christmas-tree/assets/og-cover.jpg">
+  <title>My adorable baby Taotao</title>
   <link rel="icon" type="image/png" href="./assets/star.png">
   <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
   <link rel="modulepreload" href="./src/main.js">
@@ -24,9 +37,9 @@
 </head>
 <body>
   <main>
-    <h1 class="sr-only">树上的圣诞相册</h1>
+    <h1 class="sr-only">My adorable baby Taotao</h1>
     <figure id="stage" class="stage" aria-label="互动圣诞树">
-      <img class="stage-poster" src="./assets/tree-poster.webp" alt="夜空里的暖金色圣诞树，树枝间挂着照片" width="900" height="900" fetchpriority="high">
+      <img class="stage-poster" src="./assets/tree-poster.webp" alt="浅棕色小熊玩偶抱着睡着的小黄鸭玩偶，坐在棕色波点毛毯上" width="900" height="900" fetchpriority="high">
       <div id="canvas-mount"></div>
       <div class="reticle" id="reticle" hidden aria-hidden="true"><i class="reticle-ring"></i></div>
       <p class="stage-toast" id="stage-toast" hidden aria-hidden="true"></p>
