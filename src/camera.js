@@ -112,9 +112,13 @@ export function startCamera(video, { signal, onResult, onError }) {
   const initHands = loadLibrary().then(async Hands => {
     if (stopped) return;
     const instance = new Hands({ locateFile: file => PACKAGE_ROOT + file });
-    instance.setOptions({ maxNumHands: 1, modelComplexity: 0, minDetectionConfidence: .55, minTrackingConfidence: .55 });
+    // 两只手：单手做姿势/抓取，双手做张合缩放与甩转
+    instance.setOptions({ maxNumHands: 2, modelComplexity: 0, minDetectionConfidence: .55, minTrackingConfidence: .55 });
     instance.onResults(results => {
-      if (!stopped) onResult(results.multiHandLandmarks?.[0] ?? null, performance.now());
+      if (stopped) return;
+      const hands = (results.multiHandLandmarks || []).filter(hand => hand?.length === 21);
+      hands.sort((a, b) => (a[9]?.x ?? 0) - (b[9]?.x ?? 0));
+      onResult(hands, performance.now());
     });
     hands = instance;
     const initPromise = Promise.resolve().then(() => instance.initialize());

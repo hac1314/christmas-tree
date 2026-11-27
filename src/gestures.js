@@ -16,6 +16,16 @@ const TWO_MIN_GAP = .58;
 const THREE_MIN_GAP = .55;
 const WAY_B_MAX_GAP = .32;
 const TARGET_GRACE_MS = 75;
+// —— v2 抓取 ——
+const OPEN_HOLD_MS = 420;      // 捏住不动多久算"看大图"
+const GRAB_MOVE = .028;        // 指尖移动多少算"抓起来拖"
+const PULL_OPEN = 1.32;        // 手往镜头方向拉近到这个倍数 → 照片飞出来
+const PULL_BACK = .74;         // 已经打开的图，手推远到这个倍数 → 关掉
+const FLING_MIN = .035;        // 张手平移的挥动速度阈值（触发惯性）
+const OK_GAP = .34;            // 拇指与食指相碰的阈值（👌 彩蛋）
+const COMBO_MS = 720;          // 两次握拳的间隔（双击彩蛋）
+const PAIR_MIN_SPREAD = .085;  // 两只手离得太近不算"双手手势"
+
 const POSE_TO_SHAPE = {
   fist: 'tree',
   open: 'nebula',
@@ -105,6 +115,8 @@ function measureHand(points, aspect, previousPose, isPinching = false) {
   const straightOuterThree = hasAnyJoints
     ? jointCos(9, 10, 12) > .50 && jointCos(13, 14, 16) > .50 && jointCos(17, 18, 20) > .50
     : true;
+  // 👌：拇指与食指相碰，其余三指立着
+  const ok = gap <= OK_GAP && middleExt && ringExt && pinkyExt && !indexExt;
 
   let pose = 'neutral';
   if (fist) pose = 'fist';
@@ -117,6 +129,8 @@ function measureHand(points, aspect, previousPose, isPinching = false) {
   return {
     gap,
     pose,
+    ok,
+    span: palm,
     canAim: !fist && (index >= 1.02 || others.filter(length => length > 1.25).length >= 2),
     tip: {
       x: Math.max(0, Math.min(1, 1 - (points[4].x + points[8].x) / 2)),
@@ -134,10 +148,14 @@ export function createGestureTracker() {
   let pose = 'neutral';
   let poseCandidate = 'neutral';
   let poseSince = 0;
+  let lastPoseSeen = 'neutral';
   let previousPalm = null;
   let velocityX = 0;
   let velocityY = 0;
-  let quietUntil = 0;
+  let quietUntil = -Infinity;
+  let lastFling = null;
+  let lastFistAt = -Infinity;
+  let okLatched = false;
 
   let phase = 'idle';
   let tip = null;
@@ -148,6 +166,17 @@ export function createGestureTracker() {
   let aimExitSince = null;
   let pressSince = 0;
   let releaseSince = null;
+
+  // —— 捏住之后的抓取状态 ——
+  let heldSince = 0;
+  let spanAtGrab = 0;
+  let grabTipStart = null;
+  let grabbing = false;
+  let grabOpened = false;
+
+  let pairPrev = null;
+  let pendingOk = null;
+  let pendingBurst = null;
 
   function resetMotion() {
     previousPalm = null;
@@ -164,9 +193,24 @@ export function createGestureTracker() {
     releaseSince = null;
   }
 
+  function resetGrab() {
+    heldSince = 0;
+    spanAtGrab = 0;
+    grabTipStart = null;
+    grabbing = false;
+    grabOpened = false;
+  }
+
+  function takeFling() {
+    const fling = lastFling;
+    lastFling = null;
+    return fling || undefined;
+  }
+
   function finishHold(now, hand) {
     resetAim();
     resetMotion();
+    resetGrab();
     quietUntil = now + QUIET_MS;
     // Consume the posture used to release the picture. A new shape needs a new pose.
     pose = poseCandidate = hand?.pose ?? 'neutral';
@@ -201,7 +245,244 @@ export function createGestureTracker() {
     const ry = Math.max(-.065, Math.min(.065, (hand.palm.y - previous.y) * 1.85));
     velocityX += (rx - velocityX) * .50;
     velocityY += (ry - velocityY) * .50;
+    // 张手挥动：记住这一下的速度，手消失时变成场景惯性（"甩出去"）
+    lastFling = Math.hypot(velocityX, velocityY) >= FLING_MIN ? { vx: velocityX, vy: velocityY } : lastFling;
     return { shape, dx: velocityX, dy: velocityY, status: 'open', pressProgress: 0 };
+  }
+
+  function grabSnapshot(hand, now) {
+    phase = 'held';
+    heldSince = now;
+    spanAtGrab = hand.span;
+    grabTipStart = { x: hand.tip.x, y: hand.tip.y };
+    grabbing = false;
+    grabOpened = false;
+    return { grab: target, status: 'held', pressProgress: 1, grabbing: false, pull: 1 };
+  }
+
+  function updateHeld(hand, now) {
+    const pull = spanAtGrab ? hand.span / spanAtGrab : 1;
+    const moved = grabTipStart
+      ? Math.hypot(hand.tip.x - grabTipStart.x, hand.tip.y - grabTipStart.y)
+      : 0;
+    if (!grabbing && moved >= GRAB_MOVE) grabbing = true;
+
+    if (hand.gap < RELEASED) {
+      releaseSince = null;
+      // 手往镜头方向拉 → 照片飞出来看大图
+      if (!grabOpened && target !== null && pull >= PULL_OPEN) {
+        grabOpened = true;
+        return { open: target, status: 'held', pressProgress: 1, grabbing, grabMove: { x: hand.tip.x, y: hand.tip.y } };
+      }
+      // 已经打开了，手推回去 → 关掉
+      if (grabOpened && pull <= PULL_BACK) return finishHold(now, hand);
+      // 捏住不动 → 也打开（老手感保留）
+      if (!grabOpened && !grabbing && target !== null && now - heldSince >= OPEN_HOLD_MS) {
+        grabOpened = true;
+        return { open: target, status: 'held', pressProgress: 1 };
+      }
+      if (grabbing && !grabOpened) {
+        return { status: 'held', pressProgress: 1, grabbing: true, grabMove: { x: hand.tip.x, y: hand.tip.y }, pull };
+      }
+      return { status: 'held', pressProgress: 1, grabbing: false, pull };
+    }
+
+    if (releaseSince === null) releaseSince = now;
+    if (now - releaseSince >= RELEASE_MS) {
+      const wasGrabbing = grabbing;
+      const opened = grabOpened;
+      const result = finishHold(now, hand);
+      if (wasGrabbing && !opened) return { released: true, status: hand.pose, pressProgress: 0 };
+      return result;
+    }
+    return { status: 'held', pressProgress: 1, grabbing, grabMove: grabbing ? { x: hand.tip.x, y: hand.tip.y } : undefined };
+  }
+
+  function updateSingle(points, now, aspect, locate) {
+    const result = stepSingle(points, now, aspect, locate) || { status: 'none', pressProgress: 0 };
+    if (pendingOk) {
+      result.ok = true;
+      pendingOk = null;
+      if (pendingBurst) {
+        result.burst = pendingBurst;
+        pendingBurst = null;
+      }
+    } else if (pendingBurst) {
+      result.burst = pendingBurst;
+      pendingBurst = null;
+    }
+    return result;
+  }
+
+  function stepSingle(points, now, aspect, locate) {
+    const isPinching = phase === 'aim' || phase === 'press' || phase === 'held';
+    const hand = measureHand(points, aspect, pose, isPinching);
+    if (!hand) {
+      resetMotion();
+      poseCandidate = pose;
+      if (phase === 'held') {
+        releaseSince = null;
+        if (grabbing && !grabOpened) {
+          const result = finishHold(now, null);
+          return { released: true, status: result.status, pressProgress: 0 };
+        }
+        if (now - lastSeen >= LOST_MS) return finishHold(now, null);
+        return { status: 'held', pressProgress: 1 };
+      }
+      if ((phase === 'aim' || phase === 'press') && now - lastSeen <= AIM_GAP_MS) {
+        if (phase === 'press') pressSince = null;
+        if (phase === 'aim' && lastSeen - targetSince < TARGET_MS) targetSince = now;
+        return { aim: tip, target, status: phase, pressProgress: 0, fling: takeFling() };
+      }
+      if (phase === 'press') resetAim('blocked');
+      if (phase === 'aim') resetAim();
+      if (now - lastSeen >= LOST_MS) {
+        pose = poseCandidate = 'neutral';
+        resetAim();
+      }
+      return { status: 'none', pressProgress: 0, fling: takeFling() };
+    }
+    lastSeen = now;
+
+    // 彩蛋：连握两下拳 → 撒一把星（形态切换照旧走后面的流程）
+    if (hand.pose === 'fist' && lastPoseSeen !== 'fist') {
+      const combo = now - lastFistAt <= COMBO_MS;
+      lastFistAt = now;
+      lastPoseSeen = 'fist';
+      if (combo) pendingBurst = { x: 1 - hand.palm.x, y: hand.palm.y };
+    } else if (hand.pose !== 'fist') {
+      lastPoseSeen = hand.pose;
+    }
+
+    // 彩蛋：👌 只触发一次
+    if (hand.ok && !okLatched) {
+      okLatched = true;
+      pendingOk = true;
+      pendingBurst = { x: 1 - hand.palm.x, y: hand.palm.y };
+    }
+    if (!hand.ok && hand.gap > .46) okLatched = false;
+
+    if (phase === 'held') return updateHeld(hand, now);
+
+    if (now < quietUntil) return moveScene(hand, now);
+
+    if (phase === 'press') {
+      if (hand.gap >= RELEASED) resetAim();
+      else if (hand.pose === 'fist') resetAim('blocked');
+      else {
+        if (pressSince === null) pressSince = now;
+        const elapsed = now - pressSince;
+        if (elapsed >= HOLD_MS) return grabSnapshot(hand, now);
+        return { aim: tip, target, status: 'press', pressProgress: Math.min(1, Math.max(0, elapsed / HOLD_MS)) };
+      }
+    }
+
+    if (phase === 'blocked') {
+      if (hand.gap >= RELEASED) resetAim();
+      else return moveScene(hand, now);
+    }
+
+    const isWayB = hand.pose === 'three' && hand.gap <= WAY_B_MAX_GAP;
+    const isCountPose = hand.pose === 'one' || hand.pose === 'two' || hand.pose === 'three';
+    const lockAim = phase === 'press' || (phase === 'aim' && target !== null && (hand.gap < .72 || isWayB));
+    const inAimBand = phase === 'aim' ? hand.gap < AIM_EXIT : hand.gap < AIM_ENTER;
+
+    if (phase === 'aim' && hand.canAim && !isCountPose && hand.gap >= AIM_EXIT) {
+      if (aimExitSince === null) aimExitSince = now;
+      if (now - aimExitSince < AIM_EXIT_MS) {
+        resetMotion();
+        locate(tip, target);
+        return { aim: tip, target, status: 'aim', pressProgress: 0 };
+      }
+    } else if (inAimBand) {
+      aimExitSince = null;
+    }
+
+    if (hand.canAim && inAimBand && (!isCountPose || lockAim)) {
+      resetMotion();
+      poseCandidate = pose;
+      if (hand.gap <= CLOSED) {
+        if (phase === 'aim' && target !== null && now - targetSince >= TARGET_MS) {
+          phase = 'press';
+          pressSince = now;
+          return { aim: tip, target, status: 'press', pressProgress: 0 };
+        }
+        resetAim('blocked');
+        if (hand.pose === 'three') return moveScene(hand, now);
+        return { status: hand.pose, pressProgress: 0 };
+      }
+      if (phase === 'aim' && target !== null && hand.gap <= FREEZE_GAP) {
+        tipTime = now;
+        missSince = null;
+        locate(tip, target);
+        return { aim: tip, target, status: 'aim', pressProgress: 0 };
+      }
+      const tau = target !== null ? 85 : 58;
+      const mix = tip ? 1 - Math.exp(-(now - tipTime) / tau) : 1;
+      tip = tip
+        ? { x: tip.x + (hand.tip.x - tip.x) * mix, y: tip.y + (hand.tip.y - tip.y) * mix }
+        : hand.tip;
+      tipTime = now;
+      phase = 'aim';
+      const hit = locate(tip, target);
+      if (hit !== null) {
+        missSince = null;
+        if (target !== hit) {
+          target = hit;
+          targetSince = now;
+        }
+      } else if (target !== null) {
+        if (missSince === null) missSince = now;
+        if (now - missSince >= TARGET_GRACE_MS) {
+          target = null;
+          targetSince = now;
+          missSince = null;
+        }
+      } else {
+        targetSince = now;
+        missSince = null;
+      }
+      return { aim: tip, target, status: 'aim', pressProgress: 0 };
+    }
+
+    resetAim(hand.gap < RELEASED ? 'blocked' : 'idle');
+    return moveScene(hand, now);
+  }
+
+  // —— 双手：张合缩放 + 平移旋转 ——
+  function pairUpdate(hands, now, aspect) {
+    if (!hands || hands.length < 2) {
+      pairPrev = null;
+      return null;
+    }
+    const measured = hands
+      .map(points => measureHand(points, aspect, 'neutral', false))
+      .filter(Boolean)
+      .sort((a, b) => b.palm.x - a.palm.x);
+    if (measured.length < 2) {
+      pairPrev = null;
+      return null;
+    }
+    const [a, b] = measured;
+    const spread = Math.hypot((a.palm.x - b.palm.x) * aspect, a.palm.y - b.palm.y);
+    if (spread < PAIR_MIN_SPREAD) {
+      pairPrev = null;
+      return null;
+    }
+    const angle = Math.atan2(a.palm.y - b.palm.y, (a.palm.x - b.palm.x) * aspect);
+    const mid = { x: (a.palm.x + b.palm.x) / 2, y: (a.palm.y + b.palm.y) / 2 };
+    const previous = pairPrev;
+    pairPrev = { spread, angle, mid, at: now };
+    if (!previous || now - previous.at > 400) {
+      return { status: 'pair', zoom: 1, dx: 0, dy: 0, pressProgress: 0 };
+    }
+    const zoom = Math.max(.86, Math.min(1.16, previous.spread / Math.max(.02, spread)));
+    const dx = Math.max(-.06, Math.min(.06, (previous.mid.x - mid.x) * 1.9));
+    let turn = angle - previous.angle;
+    while (turn > Math.PI) turn -= Math.PI * 2;
+    while (turn < -Math.PI) turn += Math.PI * 2;
+    const dy = Math.max(-.05, Math.min(.05, (previous.mid.y - mid.y) * 1.4 + turn * .34));
+    return { status: 'pair', zoom, dx, dy, pressProgress: 0 };
   }
 
   return {
@@ -210,125 +491,13 @@ export function createGestureTracker() {
       phase = 'blocked';
     },
     update(points, now, aspect, locate) {
-      const isPinching = phase === 'aim' || phase === 'press' || phase === 'held';
-      const hand = measureHand(points, aspect, pose, isPinching);
-      if (!hand) {
-        resetMotion();
-        poseCandidate = pose;
-        if (phase === 'held') {
-          releaseSince = null;
-          return now - lastSeen >= LOST_MS ? finishHold(now, null) : { status: 'held', pressProgress: 1 };
-        }
-        if ((phase === 'aim' || phase === 'press') && now - lastSeen <= AIM_GAP_MS) {
-          if (phase === 'press') pressSince = null;
-          if (phase === 'aim' && lastSeen - targetSince < TARGET_MS) targetSince = now;
-          return { aim: tip, target, status: phase, pressProgress: 0 };
-        }
-        if (phase === 'press') resetAim('blocked');
-        if (phase === 'aim') resetAim();
-        if (now - lastSeen >= LOST_MS) {
-          pose = poseCandidate = 'neutral';
-          resetAim();
-        }
-        return { status: 'none', pressProgress: 0 };
-      }
-      lastSeen = now;
-
-      if (phase === 'held') {
-        if (hand.gap < RELEASED) {
-          releaseSince = null;
-          return { status: 'held', pressProgress: 1 };
-        }
-        if (releaseSince === null) releaseSince = now;
-        return now - releaseSince >= RELEASE_MS ? finishHold(now, hand) : { status: 'held', pressProgress: 1 };
-      }
-
-      if (now < quietUntil) return moveScene(hand, now);
-
-      if (phase === 'press') {
-        if (hand.gap >= RELEASED) resetAim();
-        else if (hand.pose === 'fist') resetAim('blocked');
-        else {
-          if (pressSince === null) pressSince = now;
-          const elapsed = now - pressSince;
-          if (elapsed >= HOLD_MS) {
-            phase = 'held';
-            return { open: target, status: 'held', pressProgress: 1 };
-          }
-          return { aim: tip, target, status: 'press', pressProgress: Math.min(1, Math.max(0, elapsed / HOLD_MS)) };
-        }
-      }
-
-      if (phase === 'blocked') {
-        if (hand.gap >= RELEASED) resetAim();
-        else return moveScene(hand, now);
-      }
-
-      const isWayB = hand.pose === 'three' && hand.gap <= WAY_B_MAX_GAP;
-      const isCountPose = hand.pose === 'one' || hand.pose === 'two' || hand.pose === 'three';
-      const lockAim = phase === 'press' || (phase === 'aim' && target !== null && (hand.gap < .72 || isWayB));
-      const inAimBand = phase === 'aim' ? hand.gap < AIM_EXIT : hand.gap < AIM_ENTER;
-
-      if (phase === 'aim' && hand.canAim && !isCountPose && hand.gap >= AIM_EXIT) {
-        if (aimExitSince === null) aimExitSince = now;
-        if (now - aimExitSince < AIM_EXIT_MS) {
-          resetMotion();
-          locate(tip, target);
-          return { aim: tip, target, status: 'aim', pressProgress: 0 };
-        }
-      } else if (inAimBand) {
-        aimExitSince = null;
-      }
-
-      if (hand.canAim && inAimBand && (!isCountPose || lockAim)) {
-        resetMotion();
-        poseCandidate = pose;
-        if (hand.gap <= CLOSED) {
-          if (phase === 'aim' && target !== null && now - targetSince >= TARGET_MS) {
-            phase = 'press';
-            pressSince = now;
-            return { aim: tip, target, status: 'press', pressProgress: 0 };
-          }
-          resetAim('blocked');
-          if (hand.pose === 'three') return moveScene(hand, now);
-          return { status: hand.pose, pressProgress: 0 };
-        }
-        if (phase === 'aim' && target !== null && hand.gap <= FREEZE_GAP) {
-          tipTime = now;
-          missSince = null;
-          locate(tip, target);
-          return { aim: tip, target, status: 'aim', pressProgress: 0 };
-        }
-        const tau = target !== null ? 85 : 58;
-        const mix = tip ? 1 - Math.exp(-(now - tipTime) / tau) : 1;
-        tip = tip
-          ? { x: tip.x + (hand.tip.x - tip.x) * mix, y: tip.y + (hand.tip.y - tip.y) * mix }
-          : hand.tip;
-        tipTime = now;
-        phase = 'aim';
-        const hit = locate(tip, target);
-        if (hit !== null) {
-          missSince = null;
-          if (target !== hit) {
-            target = hit;
-            targetSince = now;
-          }
-        } else if (target !== null) {
-          if (missSince === null) missSince = now;
-          if (now - missSince >= TARGET_GRACE_MS) {
-            target = null;
-            targetSince = now;
-            missSince = null;
-          }
-        } else {
-          targetSince = now;
-          missSince = null;
-        }
-        return { aim: tip, target, status: 'aim', pressProgress: 0 };
-      }
-
-      resetAim(hand.gap < RELEASED ? 'blocked' : 'idle');
-      return moveScene(hand, now);
+      return updateSingle(points, now, aspect, locate);
+    },
+    updatePair(hands, now, aspect) {
+      return pairUpdate(hands, now, aspect);
+    },
+    resetPair() {
+      pairPrev = null;
     },
   };
 }

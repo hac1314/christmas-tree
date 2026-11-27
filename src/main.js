@@ -45,7 +45,8 @@ const POSE_LABELS = {
   neutral: '手势待命中',
   aim: '半捏 · 瞄准中',
   press: '捏住 · 锁定中…',
-  held: '已放大 · 松手返回',
+  held: '已捏住 · 拖动 / 松手放回',
+  pair: '双手 · 张合缩放 / 甩转',
 };
 
 const byId = id => document.getElementById(id);
@@ -285,6 +286,51 @@ dialog.addEventListener('click', event => {
   if (event.clientX < area.left || event.clientX > area.right || event.clientY < area.top || event.clientY > area.bottom) closePhoto();
 });
 
+/* 手机：看图时左右滑可换张 */
+let swipeStart = null;
+dialog.addEventListener('pointerdown', event => {
+  if (event.target.closest('button')) return;
+  swipeStart = { x: event.clientX, y: event.clientY };
+});
+dialog.addEventListener('pointerup', event => {
+  const start = swipeStart;
+  swipeStart = null;
+  if (!start || !viewer || viewer.pinch) return;
+  const dx = event.clientX - start.x;
+  const dy = event.clientY - start.y;
+  if (Math.abs(dx) > 56 && Math.abs(dx) > Math.abs(dy) * 1.5) turnPhoto(dx < 0 ? 1 : -1);
+});
+dialog.addEventListener('pointercancel', () => { swipeStart = null; });
+
+/* 长按照片 = 置顶（手机和鼠标都能用） */
+let pressTimer = null;
+let pressPoint = null;
+function stopPress() {
+  clearTimeout(pressTimer);
+  pressPoint = null;
+}
+mount.addEventListener('pointerdown', event => {
+  if (!scene || viewer || event.button > 0) return;
+  stopPress();
+  pressPoint = { x: event.clientX, y: event.clientY };
+  pressTimer = setTimeout(() => {
+    const point = pressPoint;
+    pressPoint = null;
+    if (!point || !scene) return;
+    const id = scene.pick(point.x, point.y);
+    if (!id) return;
+    collection.pinPhoto(id).then(done => {
+      if (done) showToast('已把这张照片置顶', 2000);
+    }).catch(() => {});
+  }, 520);
+});
+mount.addEventListener('pointermove', event => {
+  if (!pressPoint) return;
+  if (Math.hypot(event.clientX - pressPoint.x, event.clientY - pressPoint.y) > 12) stopPress();
+});
+mount.addEventListener('pointerup', stopPress);
+mount.addEventListener('pointercancel', stopPress);
+
 function clearAim() {
   scene?.setAiming(false);
   scene?.setHighlight(null);
@@ -468,11 +514,29 @@ function stopGesture(message = '') {
   if (message) showToast(message, 4500);
 }
 
-function showPose(session, points, now) {
+function showPose(session, hands, now) {
   if (camera !== session || !scene) return;
+  const points = hands?.length ? hands[0] : null;
   lastHandPoints = points?.length === 21 ? points : null;
   const bounds = mount.getBoundingClientRect();
   const cameraAspect = video.videoWidth / video.videoHeight || 1;
+
+  // 两只手优先：张合缩放 + 整体平移 / 甩转
+  if ((hands?.length ?? 0) >= 2) {
+    const pair = session.tracker.updatePair(hands, now, cameraAspect);
+    if (pair) {
+      clearAim();
+      if (pair.zoom !== 1) scene.zoomBy(pair.zoom);
+      if (pair.dx || pair.dy) scene.rotate(pair.dx, pair.dy);
+      scene.setHandTrail(null);
+      drawHandOverlay(points, 'pair');
+      setCameraBadge('pair', POSE_LABELS.pair);
+      return;
+    }
+  } else {
+    session.tracker.resetPair();
+  }
+
   const locate = (point, currentTarget = null) => {
     if (viewer) return null;
     scene.setAiming(true);
@@ -484,6 +548,13 @@ function showPose(session, points, now) {
   setCameraBadge(result.status, POSE_LABELS[result.status] || '手势识别中');
 
   if (result.close) closePhoto({ gesture: true });
+  if (result.released) scene.releaseGrab();
+  if (result.grab !== undefined && result.grab) scene.grabPhoto(result.grab);
+  if (result.grabMove) scene.moveGrab(result.grabMove.x, result.grabMove.y, result.pull ?? 1);
+  if (result.burst) scene.burst(result.burst.x, result.burst.y);
+  if (result.ok) showToast('👌 撒了一把星 · 再试试连握两下拳', 2800);
+  if (result.fling) scene.fling(result.fling.vx, result.fling.vy);
+
   if (result.aim && !viewer) {
     scene.setAiming(true);
     reticle.style.transform = 'translate3d(' + result.aim.x * bounds.width + 'px,' + result.aim.y * bounds.height + 'px,0)';
@@ -525,6 +596,7 @@ function showPose(session, points, now) {
   if (viewer) return;
   if (result.open) {
     const origin = scene.photoBounds(result.open);
+    scene.releaseGrab({ snap: false });
     if (origin) openPhoto(result.open, gestureButton, { bounds: origin, pinch: true });
     return;
   }
@@ -554,8 +626,8 @@ async function startGesture({ auto = false } = {}) {
       },
     });
     if (camera !== session) return;
-    cameraState('active', '摄像头已开启。握拳圣诞树，张手星云旋转，手势1爱心，手势2土星环，手势3星河螺旋，半捏瞄准捏住看图。');
-    showToast('摄像头已开启 · 握拳圣诞树 · 张手星云 · 1爱心 · 2土星环 · 3螺旋 · 捏合看图', 5500);
+    cameraState('active', '摄像头已开启。握拳圣诞树，张手星云旋转，手势1爱心，手势2土星环，手势3星河螺旋；捏住照片可以拖动、拉近看大图；两只手张合缩放。');
+    showToast('摄像头已开启 · 捏住照片能拖着走 · 张手甩一下有惯性 · 双手张合缩放', 5600);
   } catch (error) {
     if (camera !== session) return;
     if (auto) {
@@ -942,6 +1014,35 @@ musicButton.addEventListener('click', async () => {
   }
 });
 
+/* —— 手势小抄：第一次进来自动弹一次，之后点右上角 ? 再看 —— */
+const guide = byId('guide');
+const guideClose = byId('guide-close');
+const guideButton = byId('guide-button');
+const GUIDE_KEY = 'taotao-gesture-guide';
+
+function openGuide() {
+  if (!guide) return;
+  guide.hidden = false;
+  try { localStorage.setItem(GUIDE_KEY, '1'); } catch { /* 隐私模式下忽略 */ }
+  guideClose?.focus({ preventScroll: true });
+}
+
+function closeGuide() {
+  if (!guide) return;
+  guide.hidden = true;
+  guideButton?.focus({ preventScroll: true });
+}
+
+guideClose?.addEventListener('click', closeGuide);
+guide?.addEventListener('click', event => { if (event.target === guide) closeGuide(); });
+guideButton?.addEventListener('click', openGuide);
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape' && guide && !guide.hidden) closeGuide();
+});
+try {
+  if (!localStorage.getItem(GUIDE_KEY)) setTimeout(openGuide, 1400);
+} catch { /* 隐私模式下不弹 */ }
+
 async function boot() {
   preloadSceneEngine().catch(() => {});
   if (cameraSupported) preloadCameraLibrary();
@@ -961,6 +1062,19 @@ async function boot() {
   if (scene && sceneInitCurrent && cameraSupported && !document.hidden) {
     startGesture({ auto: true });
   }
+}
+
+/* 自测钩子：?debug 时把场景与手势对象暴露出来，方便无摄像头环境下验证交互 */
+if (new URLSearchParams(location.search).has('debug')) {
+  window.__taotao = {
+    get scene() { return scene; },
+    get tracker() { return camera?.tracker ?? null; },
+    get viewer() { return viewer; },
+    collection,
+    openPhoto,
+    closePhoto,
+    setShape,
+  };
 }
 
 boot();

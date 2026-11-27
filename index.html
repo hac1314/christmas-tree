@@ -57,6 +57,7 @@
       </aside>
 
       <div class="controls controls-top" role="group" aria-label="圣诞树控制">
+        <button class="control guide-button" id="guide-button" type="button" aria-label="手势说明" title="手势说明"><span class="guide-glyph" aria-hidden="true">?</span></button>
         <button class="control" id="gesture-button" type="button" aria-label="开启手势" aria-pressed="false" hidden><i class="icon icon-camera" aria-hidden="true"><b></b></i></button>
         <button class="control" id="shape-button" type="button" data-shape="tree" aria-label="切换到星云" aria-pressed="false" hidden><i class="icon icon-tree" aria-hidden="true"><b></b></i><i class="icon icon-nebula" aria-hidden="true"><b></b></i><i class="icon icon-heart" aria-hidden="true"><b></b></i><i class="icon icon-ring" aria-hidden="true"><b></b></i><i class="icon icon-spiral" aria-hidden="true"><b></b></i></button>
       </div>
@@ -68,6 +69,22 @@
       <p class="sr-only" id="gesture-message" role="status"></p>
       <p class="sr-only" id="upload-note">照片与音乐修改自动保存在当前浏览器。</p>
       <p class="sr-only" id="upload-status" role="status"></p>
+
+      <div class="guide" id="guide" hidden>
+        <div class="guide-card" role="dialog" aria-modal="true" aria-labelledby="guide-title">
+          <h2 id="guide-title">手势小抄</h2>
+          <ul class="guide-list">
+            <li><span>握拳</span>圣诞树</li>
+            <li><span>张手</span>星云；甩一下，整棵树会带着惯性转</li>
+            <li><span>1 / 2 / 3</span>爱心 · 土星环 · 星河螺旋</li>
+            <li><span>捏住照片</span>拖着走，松手放回；往镜头方向拉 → 看大图</li>
+            <li><span>两只手</span>张合缩放，一起移动或转圈</li>
+            <li><span>👌 / 连握两下拳</span>彩蛋，撒一把星</li>
+          </ul>
+          <p class="guide-note">鼠标和手指也能玩：拖动旋转、滚轮或双指缩放、长按照片置顶、看图时左右滑动换张。</p>
+          <div class="guide-actions"><button class="studio-btn studio-btn-primary" id="guide-close" type="button">知道了</button></div>
+        </div>
+      </div>
     </figure>
 
     <div class="prints" id="prints" hidden>

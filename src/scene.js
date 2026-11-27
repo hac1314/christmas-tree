@@ -649,6 +649,8 @@ function createScene(THREE, { mount, photos, reducedMotion, onPhoto, onFailure }
   const projected = new THREE.Vector3();
   const world = new THREE.Vector3();
   const toPos = new THREE.Vector3();
+  const placedPos = new THREE.Vector3();
+  const grabPoint = new THREE.Vector3();
   const fromPosScratch = new THREE.Vector3();
   const outward = new THREE.Vector3();
   const axisZ = new THREE.Vector3(0, 0, 1);
@@ -691,6 +693,7 @@ function createScene(THREE, { mount, photos, reducedMotion, onPhoto, onFailure }
   const activePointers = new Map();
   let viewing = false;
   let floatingPhoto = null;
+  let grabbed = null;   // 正被"捏住"拖动的照片：{ id, distance }
   let nebulaSpread = 1;
   const trailInk = new THREE.Color(GOLD);
   const trailRandom = randomSequence(55213);
@@ -763,6 +766,9 @@ function createScene(THREE, { mount, photos, reducedMotion, onPhoto, onFailure }
       hotTint: false,
       lastOpacity: 1,
       disposed: false,
+      grabHolding: false,
+      snapFrom: null,
+      snapT: 0,
     });
     textureJobs.push(photo);
   }
@@ -834,15 +840,29 @@ function createScene(THREE, { mount, photos, reducedMotion, onPhoto, onFailure }
       const photoStagger = (entry.order % 8) / 8 * .22;
       const local = morphProgress >= 1 ? 1 : THREE.MathUtils.clamp((morphProgress - photoStagger) / .78, 0, 1);
       const photoEased = local * local * (3 - 2 * local);
-      entry.holder.position.copy(fromPosScratch).lerp(toPos, photoEased);
+      placedPos.copy(fromPosScratch).lerp(toPos, photoEased);
       if (fromShape !== toShape && photoEased > 0 && photoEased < 1) {
         const arc = Math.sin(photoEased * Math.PI) * .55;
         const cs = Math.cos(arc);
         const sn = Math.sin(arc);
-        const px = entry.holder.position.x;
-        const pz = entry.holder.position.z;
-        entry.holder.position.x = px * cs - pz * sn;
-        entry.holder.position.z = px * sn + pz * cs;
+        const px = placedPos.x;
+        const pz = placedPos.z;
+        placedPos.x = px * cs - pz * sn;
+        placedPos.z = px * sn + pz * cs;
+      }
+      if (entry.grabHolding && grabbed?.id === entry.id) {
+        // 被捏住：位置由 moveGrab 每帧写入，这里不再覆盖
+      } else if (entry.snapFrom) {
+        entry.snapT = Math.min(1, entry.snapT + (dt > 0 ? dt : .016) / .24);
+        const snapEase = entry.snapT * entry.snapT * (3 - 2 * entry.snapT);
+        entry.holder.position.lerpVectors(entry.snapFrom, placedPos, snapEase);
+        if (entry.snapT >= 1) {
+          entry.snapFrom = null;
+          entry.snapT = 0;
+          entry.holder.position.copy(placedPos);
+        }
+      } else {
+        entry.holder.position.copy(placedPos);
       }
       tiltRotation.setFromAxisAngle(axisZ, entry.tilt);
       entry.holder.quaternion.copy(cameraFacing).multiply(tiltRotation);
@@ -853,16 +873,18 @@ function createScene(THREE, { mount, photos, reducedMotion, onPhoto, onFailure }
       const isHot = isPinchHot || isHoverHot;
       const facing = outward.copy(entry.outward).applyQuaternion(root.quaternion).z;
       const treeVisibility = THREE.MathUtils.smoothstep(facing, .28, .71);
-      const opacity = THREE.MathUtils.lerp(.58 + front * .38, treeVisibility * .99, treeWeight);
+      const isGrabHot = entry.grabHolding === true;
+      let opacity = THREE.MathUtils.lerp(.58 + front * .38, treeVisibility * .99, treeWeight);
+      if (isGrabHot) opacity = 1;
       entry.lastOpacity = opacity;
-      entry.holder.visible = floatingPhoto !== entry.id && (isHot || opacity >= .06);
-      entry.mesh.material.opacity = isHot ? 1 : opacity;
-      entry.border.material.opacity = isHot ? 1 : opacity * .79;
+      entry.holder.visible = floatingPhoto !== entry.id && (isHot || isGrabHot || opacity >= .06);
+      entry.mesh.material.opacity = isHot || isGrabHot ? 1 : opacity;
+      entry.border.material.opacity = isHot || isGrabHot ? 1 : opacity * .79;
       if (isHot !== entry.hotTint) {
         entry.hotTint = isHot;
         entry.border.material.color.setHex(isHot ? 0xfff8dc : GOLD);
       }
-      const targetScale = isPinchHot ? 1.24 : isHoverHot ? 1.13 : 1;
+      const targetScale = isGrabHot ? 1.3 : isPinchHot ? 1.24 : isHoverHot ? 1.13 : 1;
       entry.scale = THREE.MathUtils.lerp(entry.scale, targetScale, scaleAlpha);
       if (Math.abs(entry.scale - targetScale) < .002) entry.scale = targetScale;
       entry.holder.scale.setScalar(entry.scale);
@@ -1115,6 +1137,91 @@ function createScene(THREE, { mount, photos, reducedMotion, onPhoto, onFailure }
     if (aiming || viewing) return;
     targetY += dx;
     targetX = clampX(targetX + dy);
+    dirty = true;
+  }
+
+  /* ---------------------------------------------------------------
+     抓取：捏住一张照片后跟随指尖，松手吸附回原位
+     --------------------------------------------------------------- */
+  function grabPhoto(id) {
+    const entry = data.get(id);
+    if (!entry || !entry.image) return false;
+    entry.holder.getWorldPosition(world);
+    const distance = Math.max(2.8, camera.position.distanceTo(world));
+    grabbed = { id, distance };
+    entry.grabHolding = true;
+    entry.snapFrom = null;
+    entry.snapT = 0;
+    hoverId = null;
+    canvas.removeAttribute('data-hover');
+    dirty = true;
+    return true;
+  }
+
+  function moveGrab(nx, ny, pull = 1) {
+    if (!grabbed) return;
+    const entry = data.get(grabbed.id);
+    if (!entry) return;
+    const lift = Math.max(0, Math.min(.42, (pull - 1) * .55));
+    const distance = Math.max(2.2, grabbed.distance * (1 - lift));
+    coordinates.set(nx * 2 - 1, 1 - ny * 2);
+    raycaster.setFromCamera(coordinates, camera);
+    raycaster.ray.at(distance, grabPoint);
+    root.worldToLocal(grabPoint);
+    entry.holder.position.copy(grabPoint);
+    dirty = true;
+  }
+
+  function releaseGrab({ snap = true } = {}) {
+    if (!grabbed) return;
+    const entry = data.get(grabbed.id);
+    grabbed = null;
+    if (!entry) return;
+    entry.grabHolding = false;
+    if (snap && entry.image) {
+      if (!entry.snapFrom) entry.snapFrom = new THREE.Vector3();
+      entry.snapFrom.copy(entry.holder.position);
+      entry.snapT = 0;
+    }
+    dirty = true;
+  }
+
+  function zoomBy(factor) {
+    if (!Number.isFinite(factor) || factor <= 0) return;
+    const next = THREE.MathUtils.clamp(targetZoom * factor, MIN_ZOOM, MAX_ZOOM);
+    if (Math.abs(next - targetZoom) < .0004) return;
+    targetZoom = next;
+    dirty = true;
+  }
+
+  function fling(vx, vy) {
+    if (viewing) return;
+    inertiaY = THREE.MathUtils.clamp(vx, -1.6, 1.6);
+    inertiaX = THREE.MathUtils.clamp(vy, -1.0, 1.0);
+    dirty = true;
+  }
+
+  // 彩蛋：撒一把星
+  function burst(nx, ny, count = 44) {
+    if (reducedMotion) return;
+    const ndcX = (nx ?? .5) * 2 - 1;
+    const ndcY = 1 - (ny ?? .5) * 2;
+    for (let i = 0; i < count; i++) {
+      const ang = trailRandom() * Math.PI * 2;
+      const spd = .12 + trailRandom() * .36;
+      emitTrailSpark(
+        ndcX + (trailRandom() - .5) * .05,
+        ndcY + (trailRandom() - .5) * .05,
+        Math.cos(ang) * spd,
+        Math.sin(ang) * spd + .11,
+        13 + trailRandom() * 17,
+        .9 + trailRandom() * .8
+      );
+    }
+    handTrail.posAttr.needsUpdate = true;
+    handTrail.velAttr.needsUpdate = true;
+    handTrail.metaAttr.needsUpdate = true;
+    handTrail.tintAttr.needsUpdate = true;
     dirty = true;
   }
 
@@ -1393,6 +1500,12 @@ function createScene(THREE, { mount, photos, reducedMotion, onPhoto, onFailure }
     pick,
     photoBounds,
     rotate,
+    zoomBy,
+    fling,
+    burst,
+    grabPhoto,
+    moveGrab,
+    releaseGrab,
     getZoom() { return zoom; },
     resetView() {
       targetZoom = 1;
